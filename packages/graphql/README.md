@@ -27,6 +27,8 @@ As of `v4`, it is built on foundational libraries from the [gql-dart project], i
       - [GraphQL Upload](#graphql-upload)
     - [Subscriptions](#subscriptions)
     - [`client.watchQuery` and `ObservableQuery`](#clientwatchquery-and-observablequery)
+    - [`client.watchMutation`](#clientwatchmutation)
+    - [Normalization](#normalization)
   - [Direct Cache Access API](#direct-cache-access-api)
     - [`Request`, `readQuery`, and `writeQuery`](#request-readquery-and-writequery)
     - [`FragmentRequest`, `readFragment`, and `writeFragment`](#fragmentrequest-readfragment-and-writefragment)
@@ -34,6 +36,7 @@ As of `v4`, it is built on foundational libraries from the [gql-dart project], i
     - [Write strictness and `partialDataPolicy`](#write-strictness-and-partialdatapolicy)
     - [Possible cache write exceptions](#possible-cache-write-exceptions)
   - [Policies](#policies)
+    - [Rebroadcasting](#rebroadcasting)
   - [Exceptions](#exceptions)
   - [Links](#links)
     - [Composing Links](#composing-links)
@@ -43,8 +46,8 @@ As of `v4`, it is built on foundational libraries from the [gql-dart project], i
 
 **Useful API Docs:**
 
-- [`GraphQLCache`](https://pub.dev/documentation/graphql/4.0.0-alpha.11/graphql/GraphQLCache-class.html)
-- [`GraphQLDataProxy` API docs](https://pub.dev/documentation/graphql/4.0.0-alpha.11/graphql/GraphQLDataProxy-class.html) (direct cache access)
+- [`GraphQLCache`](https://pub.dev/documentation/graphql/latest/graphql/GraphQLCache-class.html)
+- [`GraphQLDataProxy` API docs](https://pub.dev/documentation/graphql/latest/graphql/GraphQLDataProxy-class.html) (direct cache access)
 
 ## Installation
 
@@ -309,12 +312,13 @@ subscription.listen(reactToAddedReview)
 
 ### `client.watchQuery` and `ObservableQuery`
 
-[`client.watchQuery`](https://pub.dev/documentation/graphql/4.0.0-alpha.11/graphql/GraphQLClient/watchQuery.html)
-can be used to execute both queries and mutations, then reactively listen to changes to the underlying data in the cache. It is used in the `Query` and `Mutation` widgets of `graphql_flutter`:
+[`client.watchQuery`](https://pub.dev/documentation/graphql/latest/graphql/GraphQLClient/watchQuery.html)
+can be used to execute both queries and mutations, then reactively listen to changes to the underlying data in the cache. 
 
 ```dart
 final observableQuery = client.watchQuery(
   WatchQueryOptions(
+    fetchResults: true,
     document: gql(
       r'''
       query HeroForEpisode($ep: Episode!) {
@@ -349,16 +353,52 @@ observableQuery.stream.listen((QueryResult result) {
 observableQuery.close();
 ```
 
-`ObservableQuery` is a bit of a kitchen sink for reactive operation logic – consider looking at the [API docs](https://pub.dev/documentation/graphql/4.0.0-alpha.11/graphql/ObservableQuery-class.html) if you'd like to develop a deeper understanding.
+`ObservableQuery` is a bit of a kitchen sink for reactive operation logic – consider looking at the [API docs](https://pub.dev/documentation/graphql/latest/graphql/ObservableQuery-class.html) if you'd like to develop a deeper understanding.
 
-> **NB**: `watchQuery` and `ObservableQuery` currently don't have a nice APIs for `update` `onCompleted` and `onError` callbacks,
+### `client.watchMutation`
+
+The default `CacheRereadPolicy` of `client.watchQuery` merges optimistic data from the cache into the result on every related cache change. This is great for queries, but [an undesirable default for mutations](https://github.com/zino-app/graphql-flutter/issues/774), as their results should not change due to subsequent mutations.
+
+While eventually [we would like to decouple mutation and query logic](https://github.com/zino-app/graphql-flutter/issues/798), for now we have `client.watchMutation` (used in the `Mutation` widget of `graphql_flutter`) which has the default policy `CacheRereadPolicy.ignoreAll`. **Otherwise, its behavior is exactly the same.** It still takes `WatchQueryOptions` and returns `ObservableQuery`, and both methods can take either mutation or query documents. The `watchMutation` method should be thought of as a stop-gap.
+
+See [Rebroadcasting](#rebroadcasting) for more details.
+
+> **NB**: `watchQuery`, `watchMutation`, and `ObservableQuery` currently don't have a nice APIs for `update` `onCompleted` and `onError` callbacks,
 > but you can have a look at how `graphql_flutter` registers them through
-> [`onData`](https://pub.dev/documentation/graphql/4.0.0-alpha.11/graphql/ObservableQuery/onData.html) in
-> [`Mutation.runMutation`](https://pub.dev/documentation/graphql_flutter/4.0.0-alpha.7/graphql_flutter/MutationState/runMutation.html).
+> [`onData`](https://pub.dev/documentation/graphql/latest/graphql/ObservableQuery/onData.html) in
+> [`Mutation.runMutation`](https://pub.dev/documentation/graphql_flutter/latest/graphql_flutter/MutationState/runMutation.html).
+
+### Normalization
+The [`GraphQLCache`](https://pub.dev/documentation/graphql/latest/graphql/GraphQLCache-class.html) automatically normalizes data from the server, and heavily leverages the [`normalize`] library. Data IDs are pulled from each selection set and used as keys in the cache.
+The [default approach](https://pub.dev/documentation/normalize/latest/utils/resolveDataId.html) is roughly:
+```dart
+String dataIdFromObject(Map<String, Object> data) {
+  final typename = data['__typename'];
+  if (typename == null) return null;
+
+  final id = data['id'] ?? data['_id'];
+  return id == null ? null : '$typename:$id';
+}
+```
+To disable cache normalization entirely, you could pass `(data) => null`.
+If you only cared about `nodeId`, you could pass `(data) => data['nodeId']`.
+
+Here's a more detailed example where the system involved contains versioned entities you don't want to clobber:
+```dart 
+String customDataIdFromObject(Map<String, Object> data) {
+    final typeName = data['__typename'];
+    final entityId = data['entityId'];
+    final version = data['version'];
+    if (typeName == null || entityId == null || version == null){
+      return null;
+    }
+    return '${typeName}/${entityId}/${version}';
+}
+```
 
 ## Direct Cache Access API
 
-The [`GraphQLCache`](https://pub.dev/documentation/graphql/4.0.0-alpha.11/graphql/GraphQLCache-class.html)
+The [`GraphQLCache`](https://pub.dev/documentation/graphql/latest/graphql/GraphQLCache-class.html)
 leverages [`normalize`] to give us a fairly apollo-ish [direct cache access] API, which is also available on `GraphQLClient`.
 This means we can do [local state management] in a similar fashion as well.
 
@@ -368,7 +408,7 @@ The cache access methods are available on any cache proxy, which includes the `G
 > **Prefer `client.writeQuery` and `client.writeFragment` to those on the `client.cache` for automatic rebroadcasting**
 
 In addition to this overview, a complete and well-commented rundown of can be found in the
-[`GraphQLDataProxy` API docs](https://pub.dev/documentation/graphql/4.0.0-alpha.11/graphql/GraphQLDataProxy-class.html).
+[`GraphQLDataProxy` API docs](https://pub.dev/documentation/graphql/latest/graphql/GraphQLDataProxy-class.html).
 
 ### `Request`, `readQuery`, and `writeQuery`
 
@@ -465,19 +505,44 @@ At link execution time, one of the following exceptions can be thrown:
 
 ## Policies
 
-Policies are used to configure execution and error behavior for a given request.
-The client's default policies can also be set for each method via the `defaultPolicies` option.
+Policies are used to configure various aspects of a request process, and can be set on any `*Options` object:
+```dart
+// override policies for a single query
+client.query(QueryOptions(
+  // return result from network and save to cache.
+  fetchPolicy: FetchPolicy.networkOnly,
+  // ignore all GraphQL errors.
+  errorPolicy: ErrorPolicy.ignore,
+  // ignore cache data.
+  cacheRereadPolicy: CacheRereadPolicy.ignore,
+  // ... 
+));
+```
+Defaults can also be overridden via `defaultPolices` on the client itself:
+```dart
+GraphQLClient(
+ defaultPolicies: DefaultPolicies(
+    // make watched mutations behave like watched queries.
+    watchMutation: Policies(
+      FetchPolicy.cacheAndNetwork,
+      ErrorPolicy.none,
+      CacheRereadPolicy.mergeOptimistic,
+    ),
+  ),
+  // ... 
+)
+```
 
-**[`FetchPolicy`](https://pub.dev/documentation/graphql/4.0.0-alpha.11/graphql/FetchPolicy-class.html):** determines where the client may return a result from.  
+**[`FetchPolicy`](https://pub.dev/documentation/graphql/latest/graphql/FetchPolicy-class.html):** determines where the client may return a result from, and whether that result will be saved to the cache.  
 Possible options:
 
-- cacheFirst (default): return result from cache. Only fetch from network if cached result is not available.
+- cacheFirst: return result from cache. Only fetch from network if cached result is not available.
 - cacheAndNetwork: return result from cache first (if it exists), then return network result once it's available.
 - cacheOnly: return result from cache if available, fail otherwise.
 - noCache: return result from network, fail if network call doesn't succeed, don't save to cache.
 - networkOnly: return result from network, fail if network call doesn't succeed, save to cache.
 
-**[`ErrorPolicy`](https://pub.dev/documentation/graphql/4.0.0-alpha.11/graphql/ErrorPolicy-class.html):** determines the level of events for errors in the execution result.  
+**[`ErrorPolicy`](https://pub.dev/documentation/graphql/latest/graphql/ErrorPolicy-class.html):** determines the level of events for errors in the execution result.  
 Possible options:
 
 - none (default): Any GraphQL Errors are treated the same as network errors and any data is ignored from the response.
@@ -485,6 +550,21 @@ Possible options:
   but doesn't save the errors or report them to your UI.
 - all: Using the all policy is the best way to notify your users of potential issues while still showing as much data as possible from your server.
   It saves both data and errors into the Apollo Cache so your UI can use them.
+
+**CacheRereadPolicy** determines whether and how cache data will be merged into the final `QueryResult.data` before it is returned.
+Possible options:
+* mergeOptimistic: Merge relevant optimistic data from the cache before returning.
+* ignoreOptimistic: Ignore optimistic data, but still allow for non-optimistic cache rebroadcasts
+  **if applicable**.
+* ignoreAll: Ignore all cache data besides the result, and never rebroadcast the result,
+  even if the underlying cache data changes.
+
+### Rebroadcasting
+Rebroadcasting behavior only applies to `watchMutation` and `watchQuery`, which both return an `ObservableQuery`.
+There is no rebroadcasting option for subscriptions, because it would be indistiguishable from the previous event in the stream.
+
+Rebroadcasting is enabled unless either `FetchPolicy.noCache` or `CacheRereadPolicy.ignoreAll` are set,
+and whether it considers optimistic results is controlled by the specific `CacheRereadPolicy`.
 
 ## Exceptions
 

@@ -8,8 +8,6 @@ import 'package:gql/language.dart';
 
 import './helpers.dart';
 
-class MockLink extends Mock implements Link {}
-
 void main() {
   const String readSingle = r'''
     query ReadSingle($id: ID!) {
@@ -45,7 +43,11 @@ void main() {
       }
     }
   ''';
-  readRepositoryData({withTypenames = true, withIds = true}) {
+  readRepositoryData({
+    bool withTypenames = true,
+    bool withIds = true,
+    bool viewerHasStarred = false,
+  }) {
     return {
       'viewer': {
         'repositories': {
@@ -53,17 +55,17 @@ void main() {
             {
               if (withIds) 'id': 'MDEwOlJlcG9zaXRvcnkyNDgzOTQ3NA==',
               'name': 'pq',
-              'viewerHasStarred': false
+              'viewerHasStarred': viewerHasStarred
             },
             {
               if (withIds) 'id': 'MDEwOlJlcG9zaXRvcnkzMjkyNDQ0Mw==',
               'name': 'go-evercookie',
-              'viewerHasStarred': false
+              'viewerHasStarred': viewerHasStarred
             },
             {
               if (withIds) 'id': 'MDEwOlJlcG9zaXRvcnkzNTA0NjgyNA==',
               'name': 'watchbot',
-              'viewerHasStarred': false
+              'viewerHasStarred': viewerHasStarred
             },
           ]
               .map((map) =>
@@ -99,7 +101,7 @@ void main() {
 
     group('query', () {
       test('successful response', () async {
-        final WatchQueryOptions _options = WatchQueryOptions(
+        final _options = QueryOptions(
           document: parseString(readRepositories),
           variables: <String, dynamic>{
             'nRepositories': 42,
@@ -111,7 +113,15 @@ void main() {
           link.request(any),
         ).thenAnswer(
           (_) => Stream.fromIterable([
-            Response(data: repoData),
+            Response(
+              data: repoData,
+              context: Context().withEntry(
+                HttpLinkResponseContext(
+                  statusCode: 200,
+                  headers: {'foo': 'bar'},
+                ),
+              ),
+            ),
           ]),
         );
 
@@ -134,6 +144,15 @@ void main() {
 
         expect(r.exception, isNull);
         expect(r.data, equals(repoData));
+
+        expect(
+          r.context.entry<HttpLinkResponseContext>().statusCode,
+          equals(200),
+        );
+        expect(
+          r.context.entry<HttpLinkResponseContext>().headers['foo'],
+          equals('bar'),
+        );
       });
 
       test('successful response without normalization', () async {
@@ -154,7 +173,7 @@ void main() {
           withIds: false,
         );
 
-        final WatchQueryOptions _options = WatchQueryOptions(
+        final _options = QueryOptions(
           document: readUnidentifiedRepositories,
           variables: {'nRepositories': 42},
         );
@@ -172,9 +191,44 @@ void main() {
         verify(link.request(_options.asRequest));
         expect(r.data, equals(repoData));
       });
+      test('correct consecutive responses', () async {
+        final _options = QueryOptions(
+          fetchPolicy: FetchPolicy.networkOnly,
+          document: parseString(readRepositories),
+          variables: <String, dynamic>{
+            'nRepositories': 42,
+          },
+        );
+        final firstData =
+            readRepositoryData(withTypenames: true, viewerHasStarred: false);
+        final secondData =
+            readRepositoryData(withTypenames: true, viewerHasStarred: true);
+
+        final resp = (d) => Stream.fromIterable([
+              Response(
+                data: d,
+                context: Context().withEntry(
+                  HttpLinkResponseContext(
+                    statusCode: 200,
+                    headers: {'foo': 'bar'},
+                  ),
+                ),
+              )
+            ]);
+
+        when(link.request(any)).thenAnswer((_) => resp(firstData));
+        QueryResult r = await client.query(_options);
+        expect(r.exception, isNull);
+        expect(r.data, equals(firstData));
+
+        when(link.request(any)).thenAnswer((_) => resp(secondData));
+        r = await client.query(_options);
+        expect(r.exception, isNull);
+        expect(r.data, equals(secondData));
+      });
 
       test('malformed server response', () async {
-        final WatchQueryOptions _options = WatchQueryOptions(
+        final _options = QueryOptions(
           document: parseString(readRepositories),
           variables: {'nRepositories': 42},
         );
@@ -373,6 +427,58 @@ void main() {
         expect(response.data, isNotNull);
         final bool viewerHasStarred =
             response.data['action']['starrable']['viewerHasStarred'] as bool;
+        expect(viewerHasStarred, true);
+      });
+
+      test('successful mutation through watchQuery', () async {
+        final _options = MutationOptions(
+          document: parseString(addStar),
+          variables: {},
+        );
+
+        when(
+          link.request(any),
+        ).thenAnswer(
+          (_) => Stream.fromIterable(
+            [
+              Response(
+                data: <String, dynamic>{
+                  'action': {
+                    'starrable': {
+                      'viewerHasStarred': true,
+                    },
+                  },
+                },
+              ),
+            ],
+          ),
+        );
+
+        final observableQuery = await client.watchQuery(WatchQueryOptions(
+          document: _options.document,
+          variables: _options.variables,
+          fetchResults: false,
+        ));
+
+        final result = await observableQuery.fetchResults().networkResult;
+
+        verify(
+          link.request(
+            Request(
+              operation: Operation(
+                document: parseString(addStar),
+                //operationName: 'AddStar',
+              ),
+              variables: <String, dynamic>{},
+              context: Context(),
+            ),
+          ),
+        );
+
+        expect(result.hasException, isFalse);
+        expect(result.data, isNotNull);
+        final bool viewerHasStarred =
+            result.data['action']['starrable']['viewerHasStarred'] as bool;
         expect(viewerHasStarred, true);
       });
     });
